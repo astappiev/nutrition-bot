@@ -7,8 +7,9 @@ from zoneinfo import ZoneInfo
 from pydantic_ai import Agent, UnexpectedModelBehavior
 from pydantic_ai.messages import BinaryContent
 
+from . import i18n
 from .db import Database, UserSettings
-from .nutrition import NUTRIENT_LABELS, NutritionFacts, resolve_reference_profile
+from .nutrition import NutritionFacts, resolve_reference_profile
 
 logger = logging.getLogger(__name__)
 
@@ -26,30 +27,10 @@ MACRO_SERVING_FIELDS = (
     "sodium_mg_serving",
 )
 
-MACRO_LABELS: dict[str, str] = {
-    "energy_kcal_serving": "Energy",
-    "protein_g_serving": "Protein",
-    "fat_g_serving": "Fat",
-    "saturated_fat_g_serving": "Saturated Fat",
-    "carbohydrate_g_serving": "Carbohydrate",
-    "sugars_g_serving": "Sugars",
-    "sodium_mg_serving": "Sodium",
-}
-
-MACRO_UNITS: dict[str, str] = {
-    "energy_kcal_serving": "kcal",
-    "protein_g_serving": "g",
-    "fat_g_serving": "g",
-    "saturated_fat_g_serving": "g",
-    "carbohydrate_g_serving": "g",
-    "sugars_g_serving": "g",
-    "sodium_mg_serving": "mg",
-}
-
 
 @dataclass
 class NutrientHighlight:
-    nutrient: str  # e.g. "Vitamin C"
+    nutrient_key: str  # e.g. "vitamin_c_mg" - resolved to a label at render time via i18n.nutrient_label
     pct_daily_value: float
     tier: str  # "excellent" (>=20% DV) | "good" (10-19% DV)
 
@@ -85,6 +66,23 @@ def _time_of_day_label(local_hour: int) -> str:
     return "Snack"
 
 
+def _with_context(content: str | list, lang: str, local_dt: datetime) -> str | list:
+    """Appends a context directive to the nutrition-agent prompt: the user's local
+    wall-clock time (never the timezone name/offset itself, only the resolved
+    time) and, for non-English users, the reply language.
+    """
+    directive = f"Current local time: {local_dt:%Y-%m-%d %H:%M}."
+    if lang != "en":
+        language_name = i18n.LANGUAGE_NAMES[lang]
+        directive += f" Respond in {language_name}: write food_description and serving_description in {language_name}."
+
+    if isinstance(content, str):
+        return f"{content}\n\n{directive}"
+    content = list(content)
+    content[0] = f"{content[0]}\n\n{directive}"
+    return content
+
+
 class MealService:
     """Logs meals via a one-shot nutrition agent and reports totals, parallel to
     `ConversationService` but talking to `db.py` directly - it never opens a
@@ -106,10 +104,15 @@ class MealService:
             if pct < 10:
                 continue
             tier = "excellent" if pct >= 20 else "good"
-            highlights.append(NutrientHighlight(nutrient=NUTRIENT_LABELS[nutrient], pct_daily_value=pct, tier=tier))
+            highlights.append(NutrientHighlight(nutrient_key=nutrient, pct_daily_value=pct, tier=tier))
         return highlights
 
     async def _log(self, user_id: int, content: str | list) -> MealLogResult:
+        settings = await self._db.get_or_create_user_settings(user_id)
+        now = time.time()
+        local_dt = datetime.fromtimestamp(now, tz=ZoneInfo(settings.timezone))
+        content = _with_context(content, settings.language, local_dt)
+
         try:
             result = await self._agent.run(content)
         except UnexpectedModelBehavior as exc:
@@ -117,10 +120,7 @@ class MealService:
             return MealLogResult(error=f"Nutrition analysis failed: {exc}")
 
         facts = result.output
-        settings = await self._db.get_or_create_user_settings(user_id)
-        now = time.time()
-        local_hour = datetime.fromtimestamp(now, tz=ZoneInfo(settings.timezone)).hour
-        name = f"{_time_of_day_label(local_hour)}: {facts.food_description}"
+        name = f"{_time_of_day_label(local_dt.hour)}: {facts.food_description}"
 
         await self._db.insert_meal(user_id, now, name, **facts.model_dump(exclude={"food_description"}))
         logger.info("user %s logged meal: %s", user_id, name)
@@ -136,6 +136,11 @@ class MealService:
     ) -> MealLogResult:
         text = caption or "Identify this food and estimate its nutrition facts."
         return await self._log(user_id, [text, BinaryContent(data=image_bytes, media_type=media_type)])
+
+    async def resolve_language(self, user_id: int, language_code: str | None) -> str:
+        lang = i18n.resolve_language(language_code)
+        await self._db.set_language(user_id, lang)
+        return lang
 
     async def day_summary(self, user_id: int) -> DaySummary:
         now = time.time()

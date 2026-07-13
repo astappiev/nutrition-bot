@@ -44,7 +44,8 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_conversation ON tool_calls (conversati
 
 CREATE TABLE IF NOT EXISTS user_settings (
     user_id INTEGER PRIMARY KEY,
-    timezone TEXT NOT NULL DEFAULT 'UTC',
+    timezone TEXT NOT NULL DEFAULT 'Europe/Berlin',
+    language TEXT NOT NULL DEFAULT 'en',
     last_day_summary_at REAL,
     sex TEXT,
     age INTEGER
@@ -121,6 +122,7 @@ class Conversation:
 class UserSettings:
     user_id: int
     timezone: str
+    language: str
     last_day_summary_at: float | None
     sex: str | None
     age: int | None
@@ -199,7 +201,17 @@ class Database:
     async def connect(self) -> None:
         self._conn = await aiosqlite.connect(self._path)
         await self._conn.executescript(SCHEMA)
+        await self._migrate()
         await self._conn.commit()
+
+    async def _migrate(self) -> None:
+        """Adds columns introduced after a table's initial CREATE TABLE IF NOT EXISTS,
+        so existing on-disk databases pick them up without a full migration framework.
+        """
+        cursor = await self._conn.execute("PRAGMA table_info(user_settings)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "language" not in columns:
+            await self._conn.execute("ALTER TABLE user_settings ADD COLUMN language TEXT NOT NULL DEFAULT 'en'")
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -329,22 +341,34 @@ class Database:
 
     async def get_or_create_user_settings(self, user_id: int) -> UserSettings:
         cursor = await self.conn.execute(
-            "SELECT user_id, timezone, last_day_summary_at, sex, age FROM user_settings WHERE user_id = ?",
+            "SELECT user_id, timezone, language, last_day_summary_at, sex, age FROM user_settings WHERE user_id = ?",
             (user_id,),
         )
         row = await cursor.fetchone()
         if row is not None:
             return UserSettings(*row)
 
-        await self.conn.execute("INSERT INTO user_settings (user_id) VALUES (?)", (user_id,))
+        await self.conn.execute(
+            "INSERT INTO user_settings (user_id, timezone) VALUES (?, 'Europe/Berlin')", (user_id,)
+        )
         await self.conn.commit()
-        return UserSettings(user_id=user_id, timezone="UTC", last_day_summary_at=None, sex=None, age=None)
+        return UserSettings(
+            user_id=user_id, timezone="Europe/Berlin", language="en", last_day_summary_at=None, sex=None, age=None
+        )
 
     async def set_timezone(self, user_id: int, tz_name: str) -> None:
         await self.conn.execute(
             """INSERT INTO user_settings (user_id, timezone) VALUES (?, ?)
                ON CONFLICT (user_id) DO UPDATE SET timezone = excluded.timezone""",
             (user_id, tz_name),
+        )
+        await self.conn.commit()
+
+    async def set_language(self, user_id: int, lang: str) -> None:
+        await self.conn.execute(
+            """INSERT INTO user_settings (user_id, language) VALUES (?, ?)
+               ON CONFLICT (user_id) DO UPDATE SET language = excluded.language""",
+            (user_id, lang),
         )
         await self.conn.commit()
 
@@ -389,7 +413,7 @@ class Database:
 
     async def reset_user_settings(self, user_id: int) -> None:
         await self.conn.execute(
-            "UPDATE user_settings SET timezone = 'UTC', last_day_summary_at = NULL, sex = NULL, age = NULL "
+            "UPDATE user_settings SET timezone = 'Europe/Berlin', last_day_summary_at = NULL, sex = NULL, age = NULL "
             "WHERE user_id = ?",
             (user_id,),
         )

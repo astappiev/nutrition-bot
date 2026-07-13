@@ -1,6 +1,7 @@
 from telegram import Update
 from telegram.ext import ApplicationHandlerStop, ContextTypes
 
+from . import i18n
 from .config import Settings
 
 
@@ -17,10 +18,11 @@ def build_authorization_gate(settings: Settings):
         if user is not None and settings.is_user_allowed(user.id):
             return
 
+        lang = i18n.resolve_language(user.language_code if user is not None else None)
         if update.callback_query is not None:
-            await update.callback_query.answer("Not authorized.")
+            await update.callback_query.answer(i18n.t("not_authorized_alert", lang))
         elif update.effective_message is not None:
-            await update.effective_message.reply_text("You are not authorized to use this bot.")
+            await update.effective_message.reply_text(i18n.t("not_authorized", lang))
         raise ApplicationHandlerStop
 
     return gate
