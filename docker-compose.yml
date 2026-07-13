@@ -1,0 +1,16 @@
+services:
+  assistant:
+    image: ${GHCR_IMAGE:-ghcr.io/astappiev/nutrition-bot:latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Overrides whatever DATABASE_PATH is set to in .env, so the DB always
+      # lands on the persistent volume regardless of the host-oriented value
+      # in .env.example.
+      DATABASE_PATH: /data/nutrition.db
+    volumes:
+      - assistant-data:/data
+    stop_grace_period: 30s
+
+volumes:
+  assistant-data:
